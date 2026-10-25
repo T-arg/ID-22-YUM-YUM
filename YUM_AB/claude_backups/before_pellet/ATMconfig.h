@@ -1,0 +1,35 @@
+#ifndef ATMCONFIG_H
+#define ATMCONFIG_H
+
+// Only sound effects are played (the ARDUBOY intro tune and the waka waka: notes, volume). Everything else is left out.
+
+// effects that are NOT used
+#define ATM_FX_FREQ_SLIDE       0
+#define ATM_FX_ARP              0
+#define ATM_FX_NOISE            0
+#define ATM_FX_TRANSPOSE        0
+#define ATM_FX_TREMOLO          0
+#define ATM_FX_VIBRATO          0
+#define ATM_FX_GLISSANDO        0
+#define ATM_FX_NOTE_CUT         0
+#define ATM_FX_CUE              0
+#define ATM_FX_TEMPO            0
+#define ATM_FX_GOTO_ADV         0
+
+// functions: ATM.playSfx() for the effects and ATM.stop() to switch the sound interrupt off afterwards (the maze needs the processor)
+#define ATM_FUNC_PLAYPAUSE      0
+#define ATM_FUNC_PAUSE          0
+#define ATM_FUNC_RESUME         0
+#define ATM_FUNC_MUTE           0
+#define ATM_FUNC_UNMUTE         0
+#define ATM_FUNC_TEMPO          0
+#define ATM_FUNC_CUE            0
+
+// the effects only use channel 1 and octaves 2-3
+#define ATM_WAVE_CH3            ATM_WAVE_OFF
+#define ATM_OCTAVE_4            0
+#define ATM_OCTAVE_5            0
+#define ATM_OCTAVE_6            0
+#define ATM_OCTAVE_7            0
+
+#endif
