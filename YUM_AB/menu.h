@@ -16,11 +16,14 @@
 void stateMenuIntro()
 {
   if (introCounter < INTRO_FRAMES) arduboyIntro(introCounter);   // the ARDUBOY letters land on the notes ...
-  else sprites.drawSelfMasked(49, 20, T_arg, 0);                 // ... then the small T-arg logo
+  else
+  {
+    if (introCounter == INTRO_FRAMES) titleMusic(true);          // the title tune starts when the small T-arg logo appears
+    sprites.drawSelfMasked(49, 20, T_arg, 0);                    // ... then the small T-arg logo
+  }
   introCounter++;
   if (introCounter > INTRO_FRAMES + 52)
   {
-    ATM.stop();                                                  // the tune is over: switch the sound interrupt off, the maze needs the processor
     gameState = STATE_MENU_MAIN;
   }
 }
@@ -28,6 +31,7 @@ void stateMenuIntro()
 // the title screen: the maze scrolls by, the logo on top, INFO PLAY CONF at the bottom
 void stateMenuMain()
 {
+  titleMusic(true);                                   // (back from the game, or sound just switched on in CONF)
   drawTitleBackground();
   drawLogo();
   drawTitleMenu();
@@ -59,10 +63,10 @@ void stateMenuSoundfx()
 {
   drawTitleBackground();
   drawPanel(24, 20, 80, 24);
-  sprites.drawSelfMasked(34, 28, menuText, 4);                                  // SFX
-  sprites.drawSelfMasked(74, 28, menuText, arduboy.audio.enabled() ? 6 : 5);    // ON / OFF
+  sprites.drawSelfMasked(34, 28, menuText, 0);                                  // SFX
+  sprites.drawSelfMasked(74, 28, menuText, arduboy.audio.enabled() ? 2 : 1);    // ON / OFF
   if (arduboy.justPressed(LEFT_BUTTON | UP_BUTTON)) arduboy.audio.on();
-  if (arduboy.justPressed(RIGHT_BUTTON | DOWN_BUTTON)) arduboy.audio.off();
+  if (arduboy.justPressed(RIGHT_BUTTON | DOWN_BUTTON)) { arduboy.audio.off(); titleMusic(false); }   // sound off: the tune stops
   if (arduboy.justPressed(A_BUTTON | B_BUTTON))
   {
     arduboy.audio.saveOnOff();
@@ -72,6 +76,7 @@ void stateMenuSoundfx()
 
 void stateMenuPlay()
 {
+  titleMusic(false);                                  // the game has no music (only sound effects)
   titleReady = false;                                 // the title builds a new maze next time
   newGame = true;
   gameState = STATE_GAME_PREPARE_LEVEL;

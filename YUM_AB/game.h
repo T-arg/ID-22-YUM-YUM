@@ -8,6 +8,7 @@
 #include "inputs.h"
 #include "playfield.h"
 #include "title.h"
+#include "gameover.h"
 
 /*
   THE DEAD ZONE
@@ -24,15 +25,27 @@
 byte deadSub = 0;                 // 1/16 px
 bool lostToDeadZone = false;
 
+// the seed of the maze: a new one for every game, B on the game over screen plays the same maze again.
+// FIXED_SEED: any number 1..65535 gives that maze every time (0 = a new maze every game)
+#define FIXED_SEED      0
+bool sameMaze = false;
+
 void resetGame()
 {
-  mazeInit();
+  uint16_t seed = FIXED_SEED;
+  if (sameMaze) seed = mazeSeed;
+  else if (!seed) seed = (uint16_t)micros() ^ (uint16_t)(millis() << 3);          // (the time between button presses is random enough)
+  sameMaze = false;
+  rngState = (uint16_t)micros() | 1;                                              // the ghosts: not seeded
+  for (uint8_t i = 0; i < 8; i++) rnd();
+  mazeInit(seed);
   player.set();
   ghostsClear(120);
+  blastR = 0;
   ensureRows(24);
-  dotRow[START_CY & (MAZE_RING - 1)] &= ~(1UL << START_CX);        // nothing to eat on the start cell
+  eatDot(START_CX, START_CY);                                      // nothing to eat on the start cell
   camY   = (player.py >> 1) - PLAYER_SY;
-  camSX  = player.px - (player.py >> 2) - 64;
+  camSX  = player.px - (player.py >> 1) - 64;
   deadY  = (player.py >> 1) - DEAD_START;
   deadSub = 0;
   freezeTime = 0;
@@ -41,7 +54,7 @@ void resetGame()
 
 // the world is made of 16 bit numbers: far down the maze everything is moved back a bit (the maze
 // lives in a ring buffer, so it does not notice)
-static void rebaseWorld()
+__attribute__((noinline)) static void rebaseWorld()
 {
   if (player.py < 24000) return;
   const int16_t unitsShift = ROW_SHIFT * 16;
@@ -50,8 +63,9 @@ static void rebaseWorld()
   player.bestRow -= ROW_SHIFT;
   gen.y -= ROW_SHIFT;
   for (byte i = 0; i < MAX_GHOSTS; i++) ghosts[i].py -= unitsShift;
+  blastY -= unitsShift;
   camY -= pxShift;
-  camSX += ROW_SHIFT * 4;                               // (the screen x of a cell depends on its row: -4 px per row)
+  camSX += ROW_SHIFT * 8;                               // (the screen x of a cell depends on its row: -4 px per row)
   deadY -= pxShift;
 }
 
@@ -62,13 +76,13 @@ static int16_t camStep(int16_t d)
   return -((-d + 3) >> 2);
 }
 
-static void updateCamera()
+__attribute__((noinline)) static void updateCamera()
 {
   camY  += camStep(((player.py >> 1) - PLAYER_SY) - camY);
-  camSX += camStep((player.px - (player.py >> 2) - 64) - camSX);
+  camSX += camStep((player.px - (player.py >> 1) - 64) - camSX);
 }
 
-static void updateDeadZone()
+__attribute__((noinline)) static void updateDeadZone()
 {
   if (!player.started) return;
   byte spd = DEAD_SPEED + player.bestRow / DEAD_RAMP;
@@ -78,7 +92,7 @@ static void updateDeadZone()
   deadSub &= 15;
   int16_t bestY = player.bestRow * 8;
   if (deadY < bestY - DEAD_LAG) deadY = bestY - DEAD_LAG;
-  if (((player.py >> 1) - 2) < deadY) { lostToDeadZone = true; player.lives = 0; freezeTime = HIT_FREEZE; }
+  if (((player.py >> 1) - 2) < deadY) { lostToDeadZone = true; player.lives = 0; freezeTime = HIT_FREEZE; sfx(SFX_DIE, 1, 860); }
 }
 
 void stateGamePrepareLevel()
@@ -115,11 +129,14 @@ void stateGamePlaying()
   {
     player.update();
     ghostsUpdate();
+    blastUpdate();
+    dotsTick();
     updateDeadZone();
     if (!freezeTime && ghostsHit())
     {
       player.lives--;
       freezeTime = HIT_FREEZE;
+      sfx(SFX_DIE, 1, 860);
     }
   }
   waveT++;
@@ -140,27 +157,17 @@ void stateGamePause()
 void stateGameOver()
 {
   drawPlayField();                                      // show where it went wrong
-  arduboy.fillRect(12, 14, 104, 36, WHITE);
-  arduboy.drawRect(13, 15, 102, 34, BLACK);
-  drawTextCentered(19, "GAME OVER", 2, BLACK);
-  char s[8]; byte n = 0;
-  uint32_t v = player.score;
-  do { s[n++] = '0' + v % 10; v /= 10; } while (v && n < 7);
-  char line[16] = "SCORE ";
-  byte l = 6;
-  while (n) line[l++] = s[--n];
-  line[l] = 0;
-  drawTextCentered(32, line, 1, BLACK);
-  drawTextCentered(41, "A TITLE  B RETRY", 1, BLACK);
-  if (arduboy.justPressed(A_BUTTON))                    // A: back to the title screen
+  sprites.drawPlusMask(49, 24, gameOver_plus_mask, 0);  // the "Game Over" words of ID-39, 30 x 16, in the middle of the screen
+  if (arduboy.justPressed(A_BUTTON))                    // A: back to the title screen (a new maze)
   {
     newGame = true;
     titleReady = false;
     gameState = STATE_MENU_MAIN;
   }
-  else if (arduboy.justPressed(B_BUTTON))               // B: play again
+  else if (arduboy.justPressed(B_BUTTON))               // B: play again, in the same maze
   {
     newGame = true;
+    sameMaze = true;
     gameState = STATE_GAME_PLAYING;
   }
 }

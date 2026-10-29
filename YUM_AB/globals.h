@@ -7,6 +7,7 @@
 #include <Sprites.h>
 #include "ATMconfig.h"
 #include <ATMlib.h>
+#define FLOOR_GRID      0       // 1 = draw the floor tile (white, with grid lines) on every path cell, 0 = bare black ground (faster)
 #include "bitmaps.h"
 
 // define menu states (on main menu)

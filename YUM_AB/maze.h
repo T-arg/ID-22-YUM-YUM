@@ -27,7 +27,6 @@
 
 #define MAZE_W        17        // cells across (twice as wide as the first version)
 #define MAZE_COLS     8         // nodes per row (MAZE_W = 2 * MAZE_COLS + 1)
-#define MAZE_MASK     ((1UL << MAZE_W) - 1)
 #define MAZE_RING     32        // cell rows kept in memory (power of 2)
 #define ROW_SHIFT     1024      // the world is shifted back by this many cell rows from time to time (see game.h); multiple of MAZE_RING
 
@@ -38,17 +37,34 @@
 #define P_LOOP        35        // % chance two neighbouring nodes of the same set get a passage (makes a loop)
 #endif
 #ifndef P_PELLET
-#define P_PELLET      5         // % chance a node (from row PELLET_FROM on) holds a power pellet
+#define P_PELLET      14        // % chance the left and the right node of a node row (from row PELLET_FROM on) hold a power pellet
 #endif
 #define PELLET_FROM   9
+#ifndef P_SPRING
+#define P_SPRING      7         // % chance of a spring (power-up JUMP) in the middle of a node row (from row SPRING_FROM on)
+#endif
+#define SPRING_FROM   12
+#ifndef P_BOMB
+#define P_BOMB        6         // % chance of a bomb (power-up) in the middle of a node row that has no spring (from row BOMB_FROM on)
+#endif
+#define BOMB_FROM     16
+#ifndef P_DOTS
+#define P_DOTS        4         // % chance of the power-up DOTS (the walls turn into dots for a while) in the middle of a node row with no other power-up
+#endif
+#define DOTS_FROM     20
 
 #ifndef P_DOWN
 #define P_DOWN        60        // % chance of an extra passage to the next row
 #endif
 
-uint32_t wallRow[MAZE_RING];    // bit x set = wall
-uint32_t dotRow[MAZE_RING];     // bit x set = there is a dot on this cell
-uint32_t pelletRow[MAZE_RING];  // bit x set = there is a power pellet on this cell
+// The maze is stored in 8 bits per row (the rest of a row is fixed: borders, pillars and nodes) instead of 17 bits per cell row:
+//   wallB[y]   node row (y odd):    bit k = passage k (between node k and k + 1) is open
+//              pillar row (y even): bit c = the passage down from node c is open
+//   eatenB[y]  bit = the dot of this cell is gone (eaten, or a power pellet / spring sits there). bit (x >> 1) for x odd, 7 + (x >> 1) for x even
+//   pelletB[y] node rows only: bit 0 = pellet at x = 1, bit 1 = pellet at x = 15, bit 2 = spring at x = 7, bit 3 = spring at x = 9, bit 4 = bomb at x = 7, bit 5 = bomb at x = 9, bit 6 = dots at x = 7, bit 7 = dots at x = 9
+uint8_t  wallB[MAZE_RING];
+uint16_t eatenB[MAZE_RING];
+uint8_t  pelletB[MAZE_RING];
 
 int16_t camY = 0;               // world Y (px) at the top of the screen
 int16_t camSX = 0;              // screen x shift of the camera
@@ -78,30 +94,92 @@ uint8_t rnd()
 }
 
 
+// the maze has a random generator of its own: the same seed always gives the same maze
+// (whatever the ghosts and the player do with rnd())
+uint16_t mazeSeed = 1;
+uint16_t mazeRng = 1;
+
+uint8_t mrnd()
+{
+  mazeRng ^= mazeRng << 7;
+  mazeRng ^= mazeRng >> 9;
+  mazeRng ^= mazeRng << 8;
+  return (uint8_t)(mazeRng ^ (mazeRng >> 8));
+}
+
+
 // queries ////////////////////////////////////////////////////////////////////
 
-// the raw wall bit: outside the maze there is nothing (used to pick the wall tiles)
-static inline bool wallBit(int16_t x, int16_t y)
+// the power-up DOTS: for dotsTime frames all walls except the border are dots that Yum Yum can walk through.
+// wallsOff: they can be walked through (it stays on after the time is up until Yum Yum is back on a real path cell),
+// wallsHide: they are drawn as dots (they come back for a moment before the end, as a warning)
+uint16_t dotsTime = 0;
+bool wallsOff = false;
+bool wallsHide = false;
+
+// the wall bit of a cell inside the maze (see the pictures above: x odd = node or passage down, x even = pillar or passage sideways)
+static bool rawWall(uint8_t x, int16_t y)
+{
+  uint8_t b = wallB[y & (MAZE_RING - 1)];
+  if (y & 1)                                          // node row
+  {
+    if (x & 1) return false;                          // a node
+    if (x == 0 || x == MAZE_W - 1) return true;       // the border
+    return !((b >> ((x >> 1) - 1)) & 1);              // passage sideways
+  }
+  if (!(x & 1)) return true;                          // pillar
+  return !((b >> (x >> 1)) & 1);                      // passage down
+}
+
+static inline bool dotsOpen(uint8_t x, int16_t y) { return x != 0 && x != MAZE_W - 1 && y > 0; }   // (not the border)
+
+static bool cellWall(uint8_t x, int16_t y)
+{
+  return rawWall(x, y) && !(wallsOff && dotsOpen(x, y));
+}
+
+// the wall bit for drawing: outside the maze there is nothing (used to pick the wall tiles)
+static bool wallBit(int16_t x, int16_t y)
 {
   if (x < 0 || x >= MAZE_W || y < 0) return false;
-  return (wallRow[y & (MAZE_RING - 1)] >> x) & 1;
+  return rawWall(x, y) && !(wallsHide && dotsOpen(x, y));
 }
 
 // for the movers: outside the maze is wall
-static inline bool isWall(int16_t x, int16_t y)
+static bool isWall(int16_t x, int16_t y)
 {
   if (x < 0 || x >= MAZE_W || y < 0) return true;
-  return (wallRow[y & (MAZE_RING - 1)] >> x) & 1;
+  return cellWall(x, y);
 }
 
-static inline bool dotAt(int16_t x, int16_t y)
+static inline uint8_t eatenBit(uint8_t x) { return (x & 1) ? (x >> 1) : 7 + (x >> 1); }
+
+static bool dotAt(int16_t x, int16_t y)
 {
-  return (dotRow[y & (MAZE_RING - 1)] >> x) & 1;
+  if (x < 0 || x >= MAZE_W || y < 0 || cellWall(x, y)) return false;
+  return !((eatenB[y & (MAZE_RING - 1)] >> eatenBit(x)) & 1);
 }
 
-static inline bool pelletAt(int16_t x, int16_t y)
+static inline void eatDot(int16_t x, int16_t y) { eatenB[y & (MAZE_RING - 1)] |= 1U << eatenBit(x); }
+
+// which bit of pelletB[] belongs to column x (0 = no pellet can be there)
+static inline uint8_t pelletMask(int16_t x) { return (x == 1) ? 1 : (x == MAZE_W - 2) ? 2 : (x == 7) ? 0x54 : (x == 9) ? 0xA8 : 0; }
+
+static bool pelletAt(int16_t x, int16_t y)
 {
-  return (pelletRow[y & (MAZE_RING - 1)] >> x) & 1;
+  return (y & 1) && (pelletB[y & (MAZE_RING - 1)] & pelletMask(x));
+}
+
+// the power-up DOTS sits here (the dots bits are 6 and 7)
+static bool dotsAt(int16_t x, int16_t y)
+{
+  return (y & 1) && (pelletB[y & (MAZE_RING - 1)] & pelletMask(x) & 0xC0);
+}
+
+// a bomb (power-up) sits here (only x = 7 or 9: the bomb bits are 4 and 5)
+static bool bombAt(int16_t x, int16_t y)
+{
+  return (y & 1) && (pelletB[y & (MAZE_RING - 1)] & pelletMask(x) & 0x30);
 }
 
 static inline int16_t deadRow() { return deadY >> 3; }          // cell rows above this one are black
@@ -159,7 +237,7 @@ static void joinSets(uint8_t k)
 // one try at the passages of a node row (uses and changes the sets)
 static void makeRow(uint8_t up, uint8_t &h, uint8_t &down)
 {
-  if (gen.hwy >= 3 && rnd() % 100 < P_HIGHWAY)                                  // a full-width corridor, with plenty of ways down
+  if (gen.hwy >= 3 && mrnd() % 100 < P_HIGHWAY)                                  // a full-width corridor, with plenty of ways down
   {
     bool ok = true;
     for (uint8_t k = 0; k < MAZE_COLS - 1; k++)                                 // (the lone pillar rule must allow all passages)
@@ -171,10 +249,10 @@ static void makeRow(uint8_t up, uint8_t &h, uint8_t &down)
       down = 0;
       uint8_t nd = 0;
       for (uint8_t c = 0; c < MAZE_COLS; c++)
-        if (downOK(c, up) && (rnd() % 100 < 75 || nodeDeg(c, up, h) < 2)) { down |= 1 << c; nd++; }
+        if (downOK(c, up) && (mrnd() % 100 < 75 || nodeDeg(c, up, h) < 2)) { down |= 1 << c; nd++; }
       for (uint8_t t = 0; t < 24 && nd < 5; t++)
       {
-        uint8_t c = rnd() & (MAZE_COLS - 1);
+        uint8_t c = mrnd() & (MAZE_COLS - 1);
         if (!((down >> c) & 1) && downOK(c, up)) { down |= 1 << c; nd++; }
       }
       return;
@@ -187,9 +265,9 @@ static void makeRow(uint8_t up, uint8_t &h, uint8_t &down)
   for (uint8_t c = 0; c < MAZE_COLS; c++)
   {
     bool hasUp = (up >> c) & 1;
-    if (hasUp && gen.vr[c] < MAX_RUN && (rnd() & 1)) continue;                  // a node with a passage from above may get its second exit later
+    if (hasUp && gen.vr[c] < MAX_RUN && (mrnd() & 1)) continue;                  // a node with a passage from above may get its second exit later
     if (nodeDeg(c, up, h) >= (hasUp ? 2 : 1)) continue;
-    bool rightFirst = rnd() & 1;
+    bool rightFirst = mrnd() & 1;
     if (c < MAZE_COLS - 1 && nodeDeg(c + 1, up, h) == 0) rightFirst = true;     // join a neighbour that has no exit either
     else if (c > 0 && nodeDeg(c - 1, up, h) == 0) rightFirst = false;
     for (uint8_t t = 0; t < 2; t++)
@@ -205,7 +283,7 @@ static void makeRow(uint8_t up, uint8_t &h, uint8_t &down)
     // the pillar above passage k has its other 3 passages open: this one must stay a wall
     if (!canOpen(h, k, up)) continue;
     bool differ = gen.set[k] != gen.set[k + 1];
-    if (rnd() % 100 < (differ ? P_JOIN : P_LOOP))
+    if (mrnd() % 100 < (differ ? P_JOIN : P_LOOP))
     {
       h |= 1 << k;
       if (differ) joinSets(k);
@@ -251,7 +329,7 @@ static void makeRow(uint8_t up, uint8_t &h, uint8_t &down)
       for (uint8_t d = c; d <= e; d++) if (downTier(d, up) < best) best = downTier(d, up);
       uint8_t n = 0;
       for (uint8_t d = c; d <= e; d++) if (downTier(d, up) == best || best == 2) n++;
-      uint8_t pick = rnd() % n;
+      uint8_t pick = mrnd() % n;
       for (uint8_t d = c; d <= e; d++) if (downTier(d, up) == best || best == 2) { if (pick == 0) { down |= 1 << d; break; } pick--; }
     }
     c = e + 1;
@@ -274,7 +352,7 @@ static void makeRow(uint8_t up, uint8_t &h, uint8_t &down)
     }
     if (has) continue;
     for (uint8_t d = 0; d < MAZE_COLS; d++) if (((any >> d) & 1) && (downTier(d, up) == best || best == 2)) { members |= 1 << d; n++; }
-    uint8_t pick = rnd() % n;
+    uint8_t pick = mrnd() % n;
     for (uint8_t d = 0; d < MAZE_COLS; d++)
     {
       if (!((members >> d) & 1)) continue;
@@ -282,7 +360,7 @@ static void makeRow(uint8_t up, uint8_t &h, uint8_t &down)
       pick--;
     }
   }
-  for (uint8_t c = 0; c < MAZE_COLS; c++) if (rnd() % 100 < P_DOWN && (!((up >> c) & 1) || gen.vr[c] < 2)) down |= 1 << c;
+  for (uint8_t c = 0; c < MAZE_COLS; c++) if (mrnd() % 100 < P_DOWN && (!((up >> c) & 1) || gen.vr[c] < 2)) down |= 1 << c;
 
 }
 
@@ -334,27 +412,39 @@ void genNodeRow()
     for (uint8_t c = 0; c < MAZE_COLS; c++) gen.set[c] = saved[c];
   }
 
-  // write the two cell rows
-  uint32_t w = 1UL | (1UL << (MAZE_W - 1));
-  for (uint8_t k = 0; k < MAZE_COLS - 1; k++) if (!((h >> k) & 1)) w |= 1UL << (2 * k + 2);
-  uint32_t v = 0;                                                                         // the pillars: x = 0, 2, 4 ...
-  for (uint8_t x = 0; x < MAZE_W; x += 2) v |= 1UL << x;
-  for (uint8_t c = 0; c < MAZE_COLS; c++) if (!((down >> c) & 1)) v |= 1UL << (2 * c + 1);
-
-  wallRow[gen.y & (MAZE_RING - 1)]       = w;
-  wallRow[(gen.y + 1) & (MAZE_RING - 1)] = v;
-  dotRow[gen.y & (MAZE_RING - 1)]        = ~w & MAZE_MASK;
-  dotRow[(gen.y + 1) & (MAZE_RING - 1)]  = ~v & MAZE_MASK;
-
-  pelletRow[gen.y & (MAZE_RING - 1)] = 0;
-  pelletRow[(gen.y + 1) & (MAZE_RING - 1)] = 0;
+  // write the two cell rows (see the top of this file for the format)
+  uint8_t r0 = gen.y & (MAZE_RING - 1), r1 = (gen.y + 1) & (MAZE_RING - 1);
+  wallB[r0] = h;
+  wallB[r1] = down;
+  eatenB[r0] = 0;
+  eatenB[r1] = 0;
+  pelletB[r0] = 0;
+  pelletB[r1] = 0;
   if (gen.y >= PELLET_FROM)
-    for (uint8_t c = 0; c < MAZE_COLS; c++)
-      if (rnd() % 100 < P_PELLET)
+    for (uint8_t c = 0; c < MAZE_COLS; c += MAZE_COLS - 1)                       // power pellets only in the first and the last node column
+      if (mrnd() % 100 < P_PELLET)
       {
-        pelletRow[gen.y & (MAZE_RING - 1)] |= 1UL << (2 * c + 1);
-        dotRow[gen.y & (MAZE_RING - 1)]    &= ~(1UL << (2 * c + 1));
+        pelletB[r0] |= (c == 0) ? 1 : 2;
+        eatenB[r0]  |= 1U << c;
       }
+  if (gen.y >= SPRING_FROM && mrnd() % 100 < P_SPRING)                          // a spring, only in the middle (node 3 or 4: x = 7 or 9)
+  {
+    uint8_t c = 3 + (mrnd() & 1);
+    pelletB[r0] |= (c == 3) ? 4 : 8;
+    eatenB[r0]  |= 1U << c;
+  }
+  else if (gen.y >= BOMB_FROM && mrnd() % 100 < P_BOMB)                         // a bomb in the same two places
+  {
+    uint8_t c = 3 + (mrnd() & 1);
+    pelletB[r0] |= (c == 3) ? 16 : 32;
+    eatenB[r0]  |= 1U << c;
+  }
+  else if (gen.y >= DOTS_FROM && mrnd() % 100 < P_DOTS)                         // the power-up DOTS
+  {
+    uint8_t c = 3 + (mrnd() & 1);
+    pelletB[r0] |= (c == 3) ? 64 : 128;
+    eatenB[r0]  |= 1U << c;
+  }
 
   for (uint8_t c = 0; c < MAZE_COLS; c++)
     gen.vr[c] = ((down >> c) & 1) ? ((((up >> c) & 1) ? gen.vr[c] : 0) + 1) : 0;
@@ -370,13 +460,16 @@ void ensureRows(int16_t y)
   while (gen.y <= y) genNodeRow();
 }
 
-void mazeInit()
+// seed 0 is not a seed (it would never change): it becomes 1
+void mazeInit(uint16_t seed)
 {
-  rngState = (uint16_t)micros() | 1;
-  for (uint8_t i = 0; i < 8; i++) rnd();
-  for (uint8_t i = 0; i < MAZE_RING; i++) { wallRow[i] = 0; dotRow[i] = 0; pelletRow[i] = 0; }
-  wallRow[0] = MAZE_MASK;                  // the wall on top of the maze
-  dotRow[0] = 0;
+  mazeSeed = seed ? seed : 1;
+  dotsTime = 0;
+  wallsOff = false;
+  wallsHide = false;
+  mazeRng = mazeSeed;
+  for (uint8_t i = 0; i < 8; i++) mrnd();
+  for (uint8_t i = 0; i < MAZE_RING; i++) { wallB[i] = 0; eatenB[i] = 0; pelletB[i] = 0; }   // (row 0 = all passages closed = the wall on top of the maze)
   gen.up = 0;
   gen.hPrev = 0;
   gen.hwy = 0;

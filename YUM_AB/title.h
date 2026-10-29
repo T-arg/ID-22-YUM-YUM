@@ -7,6 +7,7 @@
 #include "enemies.h"
 #include "playfield.h"
 #include "logo.h"
+#include "menuwords.h"
 
 /*
   TITLE SCREEN
@@ -17,8 +18,8 @@
 */
 
 #define TITLE_SCROLL    6         // 1/16 px per frame
-#define MENU_BAR_Y      56
-#define MENU_TEXT_Y     56        // the menu text is 8 px high: it fills the bar
+#define MENU_BAR_Y      52        // the black bar and the words, 4 px up from the bottom of the screen
+#define MENU_TEXT_Y     52
 #define LOGO_Y          6
 
 bool titleReady = false;          // false: the title builds a new maze next time
@@ -27,7 +28,7 @@ byte titleChoice = 1;             // 0 = INFO, 1 = PLAY, 2 = CONF
 
 void titleInit()
 {
-  mazeInit();
+  mazeInit((uint16_t)micros() ^ (uint16_t)(millis() << 3));
   ghostsClear(0);
   player.set();
   player.py = -2000;              // nobody is drawn
@@ -45,7 +46,7 @@ void drawTitleBackground()
   camY += titleSub >> 4;
   titleSub &= 15;
   if (camY > 8192 + 400) { camY -= 8192; gen.y -= ROW_SHIFT; }     // endless: shift back (see rebaseWorld in game.h)
-  camSX = (MAZE_W * 8) - ((camY + 32) >> 1) - 64;                  // the middle of the maze stays in the middle of the screen
+  camSX = (MAZE_W * 8) - (camY + 32) - 64;                   // the middle of the maze stays in the middle of the screen
   waveT++;
   drawMaze();
 }
@@ -62,22 +63,23 @@ void drawPanel(int16_t x, int16_t y, int16_t w, int16_t h)
   arduboy.drawRect(x, y, w, h, WHITE);
 }
 
+// a little ball bounces above the chosen word (like the egg in ID-39)
+const uint8_t PROGMEM menuBounce[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 2, 1, 0, 0, 0 };
+byte menuAnim = 0;
+
+#define MENU_X0         17        // the three words (30 wide) are centred, 2 px apart
+
 void drawTitleMenu()
 {
-  arduboy.fillRect(0, MENU_BAR_Y, 128, 64 - MENU_BAR_Y, BLACK);     // the black mask
-  static const byte frame[3] = { 2, 1, 3 };                         // INFO, PLAY, CONF in menuText
+  arduboy.fillRect(0, MENU_BAR_Y, 128, 8, BLACK);     // the black mask
   for (byte i = 0; i < 3; i++)
   {
-    int16_t x = 14 + 40 * i;
-    bool on = (i == titleChoice);
-    int16_t y = MENU_TEXT_Y;
-    sprites.drawSelfMasked(x, y, menuText, frame[i]);
-    if (!on)                                                        // the others are dimmed
-    {
-      for (byte yy = 0; yy < 8; yy++) for (byte xx = 0; xx < 20; xx++)
-        if ((xx + yy) & 1) arduboy.drawPixel(x + xx, y + yy, BLACK);
-    }
+    int16_t x = MENU_X0 + 32 * i;
+    sprites.drawOverwrite(x, MENU_TEXT_Y, menuWords, i);            // INFO, PLAY, CONF
   }
+  // the big ball (10 x 10 in its 16 x 16 sprite), centred on the spot where the little ball was
+  sprites.drawPlusMask(MENU_X0 + 32 * titleChoice + 10, 44 - pgm_read_byte(&menuBounce[(menuAnim >> 1) & 15]), bigBall_plus_mask, 0);
+  menuAnim++;
 }
 
 #endif

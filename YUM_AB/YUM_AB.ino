@@ -40,6 +40,13 @@ const FunctionPointer PROGMEM mainGameLoop[] = {
 };
 
 
+// Uncomment to drop the USB stack (~2.6 KB flash, ~140 B RAM).
+// Uploading then needs a manual reset (double-tap reset / hold during upload).
+// #define YUM_NO_USB
+#ifdef YUM_NO_USB
+ARDUBOY_NO_USB
+#endif
+
 void setup() {
   arduboy.boot();
   if (EEPROM.read(EEPROM_AUDIO_ON_OFF)) arduboy.audio.on();     // check EEPROM if sound is OFF or ON
