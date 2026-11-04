@@ -41,8 +41,9 @@ void ghostsClear(byte delayFrames)
 static byte ghostsWanted()
 {
   if (player.bestRow < GHOSTS_FROM_ROW) return 0;
-  byte n = 3 + (player.bestRow - GHOSTS_FROM_ROW) / 25;          // 3 ghosts at first, one more every 25 rows
-  return (n > MAX_GHOSTS) ? MAX_GHOSTS : n;
+  byte n = pgm_read_byte(&diffGhosts[difficulty]) + (player.bestRow - GHOSTS_FROM_ROW) / pgm_read_byte(&diffGhostRows[difficulty]);
+  byte m = pgm_read_byte(&diffGhostMax[difficulty]);
+  return (n > m) ? m : n;
 }
 
 static void ghostSpawn(Ghost &g)
@@ -128,23 +129,14 @@ __attribute__((noinline)) static void ghostStep(Ghost &g)
     for (byte d = 0; d < 4; d++) if (d != (g.dir ^ 2) && openDir(cx, cy, d)) opt[n++] = d;
     if (n == 0) g.dir ^= 2;
     else if (n == 1) g.dir = opt[0];
-    else if (scaredTime)                                                         // frightened: run away
-    {
-      int16_t pcx = player.px >> 4, pcy = player.py >> 4, best = -1;
-      for (byte i = 0; i < n; i++)
-      {
-        int16_t dx = cx + dirDX[opt[i]] - pcx, dy = cy + dirDY[opt[i]] - pcy;
-        int16_t dist = abs(dx) + abs(dy);
-        if (dist > best) { best = dist; g.dir = opt[i]; }
-      }
-    }
-    else if (rnd() & 7)                                                          // 7 out of 8: chase
+    else if (scaredTime || (rnd() & 7))                                          // frightened: run away, else (7 out of 8) chase
     {
       int16_t pcx = player.px >> 4, pcy = player.py >> 4, best = 32767;
       for (byte i = 0; i < n; i++)
       {
         int16_t dx = cx + dirDX[opt[i]] - pcx, dy = cy + dirDY[opt[i]] - pcy;
         int16_t dist = abs(dx) + abs(dy);
+        if (scaredTime) dist = -dist;
         if (dist < best) { best = dist; g.dir = opt[i]; }
       }
     }
@@ -193,7 +185,6 @@ __attribute__((noinline)) void ghostsUpdate()
 }
 
 // the power-up DOTS ///////////////////////////////////////////////////////////
-#define DOTS_TIME       360     // frames (8 seconds)
 #define DOTS_WARN       90      // the walls flash back for the last 2 seconds
 
 // picked up: no ghosts, the walls are dots
@@ -201,7 +192,7 @@ void dotsStart()
 {
   for (byte i = 0; i < MAX_GHOSTS; i++) ghosts[i].active = false;
   scaredTime = 0;
-  dotsTime = DOTS_TIME;
+  powerTime = POWER_TIME;
   wallsOff = true;
   wallsHide = true;
 }
@@ -209,10 +200,12 @@ void dotsStart()
 // once per frame. When the time is up the walls only come back when Yum Yum stands in the middle of a real corridor cell
 void dotsTick()
 {
+  if (powerTime) powerTime--;                                                     // the one timer of the hop, DOTS and the big ball
+  if (!powerTime) scaredTime = 0;                                                // (the ghosts can be eaten as long as it runs)
+  if (!powerTime && player.item == ITEM_SPRING) player.item = ITEM_NONE;        // the hop runs out
   if (!wallsOff) return;
-  if (dotsTime) dotsTime--;
-  wallsHide = dotsTime && !(dotsTime < DOTS_WARN && (dotsTime & 8));
-  if (dotsTime || player.jumpRem) return;
+  wallsHide = powerTime && !(powerTime < DOTS_WARN && (powerTime & 8));
+  if (powerTime || player.jumpRem) return;
   if (((player.px & 15) == 8) && ((player.py & 15) == 8) && !rawWall(player.px >> 4, player.py >> 4))
   {
     wallsOff = false;

@@ -20,7 +20,10 @@
 #define TURN_BUFFER     14      // frames a direction stays asked for after the button was pressed
 #define START_LIVES     1       // one life: touch a ghost and it is over (set to 3 for the old behaviour)
 #define DOT_SCORE       10
-#define HIT_FREEZE      36      // frames the game stands still after a hit (the death animation: 6 frames of 6)
+#define EAT_LEAD_UP     14      // going up the next cell is a whole 8 px higher and 8 px to the right: a dot there vanishes almost at once
+#define EAT_LEAD        8       // units before the middle of its cell where a dot vanishes (going left, right or up)
+#define DEATH_SPIN      48      // the death animation: first Yum Yum turns round twice (8 quarter turns of 6 frames) ...
+#define HIT_FREEZE      (DEATH_SPIN + 36)   // ... then he shrinks away (6 frames of 6): the game stands still for all of it
 #define PELLET_SCORE    50
 #define SCARED_TIME     360     // frames the ghosts are frightened (8 seconds)
 #define JUMP_CELLS      2       // a jump takes Yum Yum 2 cells forward: over a wall into the next corridor
@@ -44,6 +47,11 @@ static inline bool openDir(int16_t cx, int16_t cy, byte d)
 byte freezeTime = 0;             // counts down after a hit
 uint16_t scaredTime = 0;         // frames the ghosts are still frightened (after a power pellet)
 byte wakaTimer = 0;                     // frames the "waka waka" goes on after a dot (it follows the mouth)
+static const uint16_t fruitPts[4] PROGMEM = { 100, 300, 500, 1000 };      // cherry, apple, melon, bell
+#define POP_TIME        40                       // frames the points of a fruit stay on the screen
+uint16_t popPts = 0;                             // the points that float up where a fruit was eaten
+int16_t  popCX = 0, popCY = 0;                   // the cell
+byte     popTimer = 0;
 byte ghostCombo = 0;             // ghosts eaten with this pellet (200, 400, 800, 1600 points)
 
 struct YumYum
@@ -77,7 +85,9 @@ struct YumYum
     started = false;
     moved = false;
     scaredTime = 0;
+    powerTime = 0;
     ghostCombo = 0;
+    popTimer = 0;
     item = ITEM_NONE;
     jumpAsk = 0;
     jumpRem = 0;
@@ -95,13 +105,22 @@ struct YumYum
 
   void eat(int16_t cx, int16_t cy)
   {
+    byte fk = fruitAt(cx, cy);
+    if (fk)                                                             // a fruit: points
+    {
+      fruitB[cy & (MAZE_RING - 1)] = 0;
+      popPts = pgm_read_word(&fruitPts[fk - 1]);
+      score += popPts;
+      popCX = cx; popCY = cy; popTimer = POP_TIME;
+      sfx(SFX_GHOST + fk - 1, 1, 260);                                  // climbs with the kind of fruit
+    }
     if (dotAt(cx, cy))
     {
       eatDot(cx, cy);
       score += DOT_SCORE;
       wakaTimer = 16;                                                   // the "waka waka" keeps going with the mouth for a while
     }
-    if (pelletAt(cx, cy))
+    if (pelletAt(cx, cy) && !powerTime)                                  // (no power-up can be picked up while the timer runs)
     {
       uint8_t &pb = pelletB[cy & (MAZE_RING - 1)];
       if (cx == 7 || cx == 9)                                           // a spring, a bomb or DOTS (they only live in the middle of the playfield)
@@ -109,7 +128,8 @@ struct YumYum
         byte kind = pb & pelletMask(cx);
         pb &= ~pelletMask(cx);
         if (kind & 0xC0) dotsStart();                                   // DOTS works at once and does not take your place
-        else item = (kind & 0x30) ? ITEM_BOMB : ITEM_SPRING;            // a spring or a bomb replaces what you carry
+        else if (kind & 0x30) { item = ITEM_BOMB; if (!wallsOff) powerTime = 0; }       // a bomb or a spring replaces what you carry
+        else { item = ITEM_SPRING; powerTime = POWER_TIME; }                            // the hop is timed
         score += PELLET_SCORE;
         sfx(SFX_POWER, 1, 400);
         return;
@@ -117,9 +137,28 @@ struct YumYum
       pb &= ~pelletMask(cx);
       score += PELLET_SCORE;
       scaredTime = SCARED_TIME;
+      powerTime = POWER_TIME;                                           // the same timer: the ghosts can be eaten as long as it runs
       sfx(SFX_POWER, 1, 400);                                           // the big ball
       ghostCombo = 0;
     }
+  }
+
+  // The ball is bigger than a cell, so a dot that is still ahead would sit under his mouth: dots vanish a bit before
+  // the middle of their cell (going down they are in front of him anyway: no lead)
+  void eatAhead()
+  {
+    int16_t d, tx = px >> 4, ty = py >> 4;
+    switch (dir)
+    {
+      case DIR_RIGHT: tx = (px + 7) >> 4; d = tx * 16 + 8 - px; break;
+      case DIR_LEFT:  tx = (px - 8) >> 4; d = px - (tx * 16 + 8); break;
+      case DIR_UP:    ty = (py - 8) >> 4; d = py - (ty * 16 + 8); if (d > 0 && d <= EAT_LEAD_UP && dotAt(tx, ty)) { eatDot(tx, ty); score += DOT_SCORE; wakaTimer = 16; } return;
+      default: return;
+    }
+    if (d <= 0 || d > EAT_LEAD || !dotAt(tx, ty)) return;
+    eatDot(tx, ty);
+    score += DOT_SCORE;
+    wakaTimer = 16;
   }
 
   __attribute__((noinline)) void step()                   // one unit
@@ -138,8 +177,7 @@ struct YumYum
       ensureRows(ty + 3);
       if (!isWall(tx, ty))                                              // (it must land in a corridor)
       {
-        item = ITEM_NONE;
-        jumpAsk = 0;
+        jumpAsk = 0;                                                    // (the spring is not used up: you can hop as long as the timer runs)
         jumpRem = JUMP_CELLS * 16;
         return;
       }
@@ -152,6 +190,7 @@ struct YumYum
     if (dir & 1) px += (dir == DIR_RIGHT) ? 1 : -1;
     else         py += (dir == DIR_DOWN) ? 1 : -1;
     moved = true;
+    eatAhead();
   }
 
   __attribute__((noinline)) void update()

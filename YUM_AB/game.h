@@ -9,6 +9,7 @@
 #include "playfield.h"
 #include "title.h"
 #include "gameover.h"
+#include "pause.h"
 
 /*
   THE DEAD ZONE
@@ -64,6 +65,7 @@ __attribute__((noinline)) static void rebaseWorld()
   gen.y -= ROW_SHIFT;
   for (byte i = 0; i < MAX_GHOSTS; i++) ghosts[i].py -= unitsShift;
   blastY -= unitsShift;
+  popCY -= ROW_SHIFT;
   camY -= pxShift;
   camSX += ROW_SHIFT * 8;                               // (the screen x of a cell depends on its row: -4 px per row)
   deadY -= pxShift;
@@ -128,6 +130,7 @@ void stateGamePlaying()
   else
   {
     player.update();
+    if (popTimer) popTimer--;
     ghostsUpdate();
     blastUpdate();
     dotsTick();
@@ -148,9 +151,7 @@ void stateGamePlaying()
 void stateGamePause()
 {
   drawPlayField();                                      // show the frozen scene
-  arduboy.fillRect(34, 24, 60, 16, WHITE);
-  arduboy.drawRect(35, 25, 58, 14, BLACK);
-  drawTextCentered(29, "PAUSE", 2, BLACK);
+  sprites.drawPlusMask(47, 28, pause_plus_mask, 0);     // the word PAUSE, 33 x 8, in the middle of the screen
   if (arduboy.justPressed(A_BUTTON | B_BUTTON)) gameState = STATE_GAME_PLAYING;
 }
 

@@ -13,6 +13,9 @@
 #include "spring.h"
 #include "bomb.h"
 #include "dots.h"
+#include "digits.h"
+#include "wallpack.h"
+#include "fruit.h"
 
 /*
   DRAWING
@@ -26,7 +29,7 @@
   and Yum Yum that stand in that row. So a wall in the row below covers the feet of whoever walks in
   front of it. The dead zone is painted over everything at the end.
 
-  A wall tile is 24 x 8 (45 degree parallelogram, no overlap; each row shifts 8 px). OLD: 21 x 16: the lower 8 rows are the floor of its own cell, the upper 8 rows are the top
+  A wall tile is 23 x 16 (the bottom left pixel is the bottom left corner of the cell, so the tile is drawn 8 px above sy; the upper 8 rows overhang the row above). OLD: 21 x 16: the lower 8 rows are the floor of its own cell, the upper 8 rows are the top
   of the wall, sticking out over the cell above. The floor of the cell is its parallelogram with its
   top left corner at (16 cx - 4 cy, 8 cy); the tile starts 4 px to the left and 8 px above that.
 */
@@ -57,12 +60,50 @@ static inline uint8_t tileAt(int16_t x, int16_t y)
 static inline int16_t unitScreenX(int16_t px, int16_t py) { return px - (py >> 1) - camSX; }
 static inline int16_t unitScreenY(int16_t py)             { return (py >> 1) - camY; }
 
+// a wall tile (23 x 16, image + mask like Sprites::drawPlusMask): the tile is unpacked from wallPack[] (run length coding, see
+// tools/packwalls.py) into 92 bytes of RAM: 46 image bytes (page 0, page 1) then 46 mask bytes, and blitted to the screen buffer.
+static void drawWallTile(int16_t x, int16_t y, byte t)
+{
+  byte tile[92];
+  const byte *p = wallPack + pgm_read_word(&wallOff[t]);
+  for (byte n = 0; n < 92;)
+  {
+    byte c = pgm_read_byte(p++);
+    if (c & 128) { c -= 126; byte v = pgm_read_byte(p++); while (c--) tile[n++] = v; }
+    else         { c++;                                     while (c--) tile[n++] = pgm_read_byte(p++); }
+  }
+  byte *scr = arduboy.getBuffer();
+  int8_t page = y >> 3;
+  byte sh = y & 7;
+  for (byte c = 0; c < 23; c++)
+  {
+    int16_t sx = x + c;
+    if (sx < 0 || sx > 127) continue;
+    for (byte q = 0; q < 4; q++)                                   // 2 source pages, each hits 2 screen pages
+    {
+      int8_t tp = page + (q >> 1) + (q & 1);
+      if (tp < 0 || tp > 7) continue;
+      byte i = tile[(q >> 1) * 23 + c], m = tile[46 + (q >> 1) * 23 + c];
+      uint16_t ii = (uint16_t)i << sh, mm = (uint16_t)m << sh;
+      if (q & 1) { ii >>= 8; mm >>= 8; }
+      byte *d = scr + tp * 128 + sx;
+      *d = (*d & ~(byte)mm) | (byte)ii;
+    }
+  }
+}
+
 static void drawYumYum()
 {
   int16_t cx = unitScreenX(player.px, player.py) - 9, cy = unitScreenY(player.py) - 9 - SPRITE_LIFT - player.lift();
   if (freezeTime)                                                                // a hit: Yum Yum shrinks away
   {
-    byte f = (HIT_FREEZE - freezeTime) / 6;
+    byte t = HIT_FREEZE - freezeTime;
+    if (t < DEATH_SPIN)                                                          // turning round, twice, with the normal sprite (open mouth)
+    {
+      drawStrips(cx, cy, FR_YUM + ((player.dir + t / 6) & 3) * 4 + 3);
+      return;
+    }
+    byte f = (t - DEATH_SPIN) / 6;
     drawStrips(cx, cy, FR_DEATH + ((f > 5) ? 5 : f));
     return;
   }
@@ -94,6 +135,52 @@ static void drawGhostsInRow(int16_t y)
   }
 }
 
+// the dots, the pellets and the pick-ups of one row of cells (painted after the tiles of that row)
+static void drawRowItems(int16_t y)
+{
+  int16_t sy  = 8 * y - camY;
+  int16_t sx0 = -8 * y - 8 - camSX;
+  int16_t xLo = (-23 - sx0) >> 4, xHi = (127 - sx0) >> 4;
+  if (xLo < 0) xLo = 0;
+  if (xHi > MAZE_W - 1) xHi = MAZE_W - 1;
+  for (int16_t x = xLo; x <= xHi; x++)
+  {
+    int16_t sx = sx0 + 16 * x;
+    if (sx <= -23 || sx >= 128 || wallBit(x, y)) continue;
+    byte fk = fruitAt(x, y);
+    if (fk)                                                                      // a fruit: floats a little above the floor
+    {
+      byte fw = pgm_read_byte(fruit_plus_mask), fh = pgm_read_byte(fruit_plus_mask + 1);
+      int16_t hop = pgm_read_byte(&dotBounce[((waveT >> 1) + y) & 15]) >> 1;
+      sprites.drawPlusMask(sx + 12 - fw / 2, sy + 3 - fh / 2 - hop, fruit_plus_mask, fk - 1);
+      continue;
+    }
+    if (pelletAt(x, y) && powerTime) continue;                                   // no power-ups on the playfield while the timer runs
+    if (pelletAt(x, y) && (x == 7 || x == 9))                                    // the spring (power-up JUMP) or the bomb: it hops a little
+    {
+      int16_t hop = pgm_read_byte(&dotBounce[((waveT >> 1) + y) & 15]) >> 1;
+      byte f = (waveT >> 3) % 3;                                                // the 3 frames of the animation
+      const unsigned char *spr = bombAt(x, y) ? bomb_plus_mask : dotsAt(x, y) ? dots_plus_mask : spring_plus_mask;
+      sprites.drawPlusMask(sx + 4, sy - 5 - hop, spr, f);                       // (all three are 16 x 16)
+    }
+    else if (pelletAt(x, y))                                                     // power pellet: the big ball, it only blinks
+    {
+      if (waveT & 8) continue;
+      sprites.drawPlusMask(sx + 7, sy - 1, bigBall_plus_mask, 0);                // (stays on the floor, no bounce)
+    }
+    else if (dotAt(x, y))                                                        // white dots, bouncing in a wave that runs across the maze
+    {
+      byte lift = pgm_read_byte(&dotBounce[((waveT >> 1) + x * 2 + y) & 15]);
+      sprites.drawPlusMask(sx + DOT_OX, sy + DOT_OY - lift, littleBalls_plus_mask, 0);
+    }
+  }
+}
+
+/*
+  Paint order: for every row of cells: its tiles, the ghosts of the row, and (a row later) Yum Yum, who is bigger than
+  his cell. He is painted after the tiles of his own row and before those of the row below, so the pipes of the row below
+  are in front of him. The dots of his own row and of the row above are painted after him, so they are in front of him.
+*/
 void drawMaze()
 {
   int16_t yFirst = (camY >> 3) - 1;
@@ -107,35 +194,26 @@ void drawMaze()
   {
     int16_t sy  = 8 * y - camY;
     int16_t sx0 = -8 * y - 8 - camSX;
-    int16_t xLo = (-24 - sx0) >> 4, xHi = (127 - sx0) >> 4;                      // only the columns that are on the screen
+    int16_t xLo = (-23 - sx0) >> 4, xHi = (127 - sx0) >> 4;                      // only the columns that are on the screen
     if (xLo < 0) xLo = 0;
     if (xHi > MAZE_W - 1) xHi = MAZE_W - 1;
     for (int16_t x = xLo; x <= xHi; x++)
     {
       int16_t sx = sx0 + 16 * x;
-      if (sx <= -24 || sx >= 128) continue;
-      if (wallBit(x, y)) sprites.drawPlusMask(sx, sy, wallTiles_plus_mask, tileAt(x, y));
-      else
-      {
+      if (sx <= -23 || sx >= 128) continue;
+      if (wallBit(x, y)) drawWallTile(sx, sy - 8, tileAt(x, y));
 #if FLOOR_GRID
-        sprites.drawPlusMask(sx, sy, floorTile_plus_mask, 0);
+      else sprites.drawPlusMask(sx, sy, floorTile_plus_mask, 0);
 #endif
-        if (pelletAt(x, y) && (x == 7 || x == 9))                                // the spring (power-up JUMP) or the bomb: it hops a little
-          sprites.drawPlusMask(sx + 7, sy - 3 - (pgm_read_byte(&dotBounce[((waveT >> 1) + y) & 15]) >> 1), bombAt(x, y) ? bomb_plus_mask : dotsAt(x, y) ? dots_plus_mask : spring_plus_mask, 0);
-        else if (pelletAt(x, y))                                                 // power pellet: the big ball, it only blinks
-        {
-          if (waveT & 8) continue;
-          sprites.drawPlusMask(sx + 7, sy - 1, bigBall_plus_mask, 0);               // the ball is 10 x 10 in the top left of its 16 x 16 sprite: centred on the floor              // (stays on the floor, no bounce)
-        }
-        else if (dotAt(x, y))                                                         // white dots, bouncing in a wave that runs across the maze
-        {
-          byte lift = pgm_read_byte(&dotBounce[((waveT >> 1) + x * 2 + y) & 15]);
-          sprites.drawPlusMask(sx + DOT_OX, sy + DOT_OY - lift, littleBalls_plus_mask, 0);
-        }
-      }
     }
+    if (y != pRow - 1 && y != pRow) drawRowItems(y);
     drawGhostsInRow(y);
-    if (pRow == y) drawYumYum();
+    if (pRow == y)                                                               // Yum Yum, then the dots of his row and the row above in front of him
+    {
+      drawYumYum();
+      if (y - 1 >= yFirst) drawRowItems(y - 1);
+      drawRowItems(y);
+    }
   }
 
   int16_t d = deadY - camY;                                                      // the dead zone: black, with a ragged edge
@@ -151,88 +229,30 @@ void drawMaze()
 }
 
 
-// text and score /////////////////////////////////////////////////////////////
-// font 3 wide x 5 high: the 5 rows of a glyph are packed in one 16 bit number, 3 bits per row, the top row first (bit 2 of a row = left pixel)
-// 0 - 9 then A - Z
-const uint16_t PROGMEM glyphFont[36] =
-{
-  0x7B6F, 0x2C97, 0x73E7, 0x73CF, 0x5BC9, 0x79CF,
-  0x79EF, 0x7292, 0x7BEF, 0x7BCF, 0x2BED, 0x6BAE,
-  0x7927, 0x6B6E, 0x79A7, 0x79A4, 0x796F, 0x5BED,
-  0x7497, 0x126A, 0x5BAD, 0x4927, 0x5FED, 0x7B6D,
-  0x7B6F, 0x7BE4, 0x7B79, 0x6BAD, 0x79CF, 0x7492,
-  0x5B6F, 0x5B6A, 0x5BFD, 0x5AAD, 0x5A92, 0x72A7,
-};
+// the score ///////////////////////////////////////////////////////////////////
+// the digits come from the sheet in digits.h (9 x 8 with their own 1 px outline). They overlap 2 px (DIGIT_STEP 7), so they are
+// drawn from right to left: every digit covers the left edge of the one to its right.
+#define SCORE_X         3
+#define SCORE_Y         55      // bottom left corner
+#define DIGIT_STEP      7
 
-// the 15 bits of a character (0 = nothing to draw)
-static uint16_t glyphBits(char ch)
-{
-  if (ch >= '0' && ch <= '9') return pgm_read_word(&glyphFont[ch - '0']);
-  if (ch >= 'A' && ch <= 'Z') return pgm_read_word(&glyphFont[10 + ch - 'A']);
-  return 0;
-}
-
-static void drawGlyph(int16_t x, int16_t y, char ch, byte scale, byte color)
-{
-  uint16_t g = glyphBits(ch);
-  for (byte r = 0; r < 5; r++)
-  {
-    byte bits = (g >> (12 - 3 * r)) & 7;
-    for (byte c = 0; c < 3; c++)
-    {
-      if (bits & (4 >> c)) arduboy.fillRect(x + c * scale, y + r * scale, scale, scale, color);
-    }
-  }
-}
-
-static void drawText(int16_t x, int16_t y, const char *s, byte scale, byte color)
-{
-  while (*s) { drawGlyph(x, y, *s++, scale, color); x += 4 * scale; }
-}
-
-static int16_t textWidth(const char *s, byte scale)
-{
-  byte n = 0;
-  while (s[n]) n++;
-  return n ? n * 4 * scale - scale : 0;
-}
-
-static void drawTextCentered(int16_t y, const char *s, byte scale, byte color)
-{
-  drawText((128 - textWidth(s, scale)) / 2, y, s, scale, color);
-}
-
-// the score, white digits with a black outline, bottom left corner
-void drawScore()
+// a number from the digit sheet, right to left (the digits overlap), the left edge at x or, when centred, the middle
+void drawNumber(int16_t x, int16_t y, uint32_t v, bool centred)
 {
   char d[8]; byte n = 0;
-  uint32_t s = player.score;
-  do { d[n++] = s % 10; s /= 10; } while (s && n < 7);       // digits, last one first
-
-  for (byte pass = 0; pass < 2; pass++)                       // pass 0: black outline, pass 1: white digits
-  {
-    for (byte i = 0; i < n; i++)
-    {
-      uint16_t g = pgm_read_word(&glyphFont[d[n - 1 - i]]);
-      int16_t bx = 4 + i * 4, by = 64 - 2 - 5;
-      for (byte r = 0; r < 5; r++)
-      {
-        byte bits = (g >> (12 - 3 * r)) & 7;
-        for (byte c = 0; c < 3; c++)
-        {
-          if (!(bits & (4 >> c))) continue;
-          if (pass == 0) arduboy.fillRect(bx + c - 1, by + r - 1, 3, 3, BLACK);
-          else           arduboy.drawPixel(bx + c, by + r, WHITE);
-        }
-      }
-    }
-  }
+  do { d[n++] = v % 10; v /= 10; } while (v && n < 7);       // digits, last one first
+  if (centred) x -= ((n - 1) * DIGIT_STEP + 9) / 2;
+  for (byte k = 0; k < n; k++)                              // right to left
+    sprites.drawPlusMask(x + (n - 1 - k) * DIGIT_STEP, y, digits_plus_mask, d[k]);
 }
 
-// the power-up you carry (B uses it), top right
-void drawItemHud()
+void drawScore() { drawNumber(SCORE_X, SCORE_Y, player.score, false); }
+
+// the points of a fruit float up from the cell where it was eaten
+static void drawPopup()
 {
-  if (player.item) sprites.drawPlusMask(116, 0, (player.item == ITEM_BOMB) ? bomb_plus_mask : spring_plus_mask, 0);
+  if (!popTimer) return;
+  drawNumber(-8 * popCY - 8 - camSX + 16 * popCX + 12, 8 * popCY - camY - 4 - (POP_TIME - popTimer) / 3, popPts, true);
 }
 
 // the blast of the bomb: an ellipse (2 : 1) that grows from Yum Yum. It is a circle of radius r with every x doubled.
@@ -274,12 +294,21 @@ static void drawBlast()
   blastRing(cx, cy, r - 1, true);
 }
 
+// the time that is left of the hop or DOTS: a white line (2 px) on a black strip (4 px) at the right, it gets shorter
+static void drawPowerBar()
+{
+  if (!powerTime) return;
+  arduboy.fillRect(124, 0, 4, 64, BLACK);
+  byte h = ((uint32_t)powerTime * 64) / POWER_TIME;
+  if (h) arduboy.fillRect(125, 64 - h, 2, h, WHITE);
+}
+
 void drawPlayField()
 {
   drawMaze();
   drawBlast();
-  drawItemHud();
-  if (wallsOff && dotsTime) arduboy.fillRect(0, 0, dotsTime / 3, 1, WHITE);        // the time that is left of DOTS
+  drawPopup();
+  drawPowerBar();
   drawScore();
 }
 

@@ -3,6 +3,7 @@
 
 #include "globals.h"
 #include "title.h"
+#include "conftext.h"
 
 // the ARDUBOY intro at 45 fps (see the table in arduboy_intro.h), then the small T-arg logo
 #define INTRO_STEP        11
@@ -53,8 +54,9 @@ void stateMenuHelp()                                  // (not reachable from the
 void stateMenuInfo()
 {
   drawTitleBackground();
-  drawPanel(10, 14, 108, 36);
-  arduboy.drawBitmap(16, 20, info, 96, 24, WHITE);
+  drawLogo();
+  arduboy.fillRect(0, MENU_BAR_Y, 128, 8, BLACK);                               // the same black bar as the title menu
+  sprites.drawOverwrite(14, MENU_TEXT_Y, text_created, 0);                      // CREATED BY JOERI
   if (arduboy.justPressed(A_BUTTON | B_BUTTON)) gameState = STATE_MENU_MAIN;
 }
 
@@ -62,10 +64,12 @@ void stateMenuInfo()
 void stateMenuSoundfx()
 {
   drawTitleBackground();
-  drawPanel(24, 20, 80, 24);
-  sprites.drawSelfMasked(34, 28, menuText, 0);                                  // SFX
-  sprites.drawSelfMasked(74, 28, menuText, arduboy.audio.enabled() ? 2 : 1);    // ON / OFF
-  if (arduboy.justPressed(LEFT_BUTTON | UP_BUTTON)) arduboy.audio.on();
+  drawLogo();
+  arduboy.fillRect(0, MENU_BAR_Y, 128, 8, BLACK);
+  sprites.drawOverwrite(34, MENU_TEXT_Y, text_sound, 0);                        // SOUND
+  if (arduboy.audio.enabled()) sprites.drawOverwrite(73, MENU_TEXT_Y, text_on, 0);   // ON
+  else                         sprites.drawOverwrite(73, MENU_TEXT_Y, text_off, 0);  // OFF
+  if (arduboy.justPressed(LEFT_BUTTON | UP_BUTTON)) { arduboy.audio.on(); titleMusic(true); }   // sound on: the tune starts again
   if (arduboy.justPressed(RIGHT_BUTTON | DOWN_BUTTON)) { arduboy.audio.off(); titleMusic(false); }   // sound off: the tune stops
   if (arduboy.justPressed(A_BUTTON | B_BUTTON))
   {
@@ -74,12 +78,22 @@ void stateMenuSoundfx()
   }
 }
 
+// PLAY: first the difficulty menu EASY NORMAL HARD (LEFT / RIGHT, A or B starts the game)
 void stateMenuPlay()
 {
-  titleMusic(false);                                  // the game has no music (only sound effects)
-  titleReady = false;                                 // the title builds a new maze next time
-  newGame = true;
-  gameState = STATE_GAME_PREPARE_LEVEL;
+  titleMusic(true);
+  drawTitleBackground();
+  drawLogo();
+  drawLevelMenu();
+  if (arduboy.justPressed(RIGHT_BUTTON) && (difficulty < 2)) difficulty++;
+  if (arduboy.justPressed(LEFT_BUTTON) && (difficulty > 0)) difficulty--;
+  if (arduboy.justPressed(A_BUTTON | B_BUTTON))
+  {
+    titleMusic(false);                                // the game has no music (only sound effects)
+    titleReady = false;                               // the title builds a new maze next time
+    newGame = true;
+    gameState = STATE_GAME_PREPARE_LEVEL;
+  }
 }
 
 #endif
