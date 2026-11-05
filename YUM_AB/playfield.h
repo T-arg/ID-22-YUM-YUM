@@ -14,7 +14,6 @@
 #include "bomb.h"
 #include "dots.h"
 #include "digits.h"
-#include "wallpack.h"
 #include "fruit.h"
 
 /*
@@ -59,38 +58,6 @@ static inline uint8_t tileAt(int16_t x, int16_t y)
 // screen position of the centre of the floor at unit position (px, py)
 static inline int16_t unitScreenX(int16_t px, int16_t py) { return px - (py >> 1) - camSX; }
 static inline int16_t unitScreenY(int16_t py)             { return (py >> 1) - camY; }
-
-// a wall tile (23 x 16, image + mask like Sprites::drawPlusMask): the tile is unpacked from wallPack[] (run length coding, see
-// tools/packwalls.py) into 92 bytes of RAM: 46 image bytes (page 0, page 1) then 46 mask bytes, and blitted to the screen buffer.
-static void drawWallTile(int16_t x, int16_t y, byte t)
-{
-  byte tile[92];
-  const byte *p = wallPack + pgm_read_word(&wallOff[t]);
-  for (byte n = 0; n < 92;)
-  {
-    byte c = pgm_read_byte(p++);
-    if (c & 128) { c -= 126; byte v = pgm_read_byte(p++); while (c--) tile[n++] = v; }
-    else         { c++;                                     while (c--) tile[n++] = pgm_read_byte(p++); }
-  }
-  byte *scr = arduboy.getBuffer();
-  int8_t page = y >> 3;
-  byte sh = y & 7;
-  for (byte c = 0; c < 23; c++)
-  {
-    int16_t sx = x + c;
-    if (sx < 0 || sx > 127) continue;
-    for (byte q = 0; q < 4; q++)                                   // 2 source pages, each hits 2 screen pages
-    {
-      int8_t tp = page + (q >> 1) + (q & 1);
-      if (tp < 0 || tp > 7) continue;
-      byte i = tile[(q >> 1) * 23 + c], m = tile[46 + (q >> 1) * 23 + c];
-      uint16_t ii = (uint16_t)i << sh, mm = (uint16_t)m << sh;
-      if (q & 1) { ii >>= 8; mm >>= 8; }
-      byte *d = scr + tp * 128 + sx;
-      *d = (*d & ~(byte)mm) | (byte)ii;
-    }
-  }
-}
 
 static void drawYumYum()
 {
@@ -201,7 +168,7 @@ void drawMaze()
     {
       int16_t sx = sx0 + 16 * x;
       if (sx <= -23 || sx >= 128) continue;
-      if (wallBit(x, y)) drawWallTile(sx, sy - 8, tileAt(x, y));
+      if (wallBit(x, y)) sprites.drawPlusMask(sx, sy - 8, wallTiles_plus_mask, tileAt(x, y));
 #if FLOOR_GRID
       else sprites.drawPlusMask(sx, sy, floorTile_plus_mask, 0);
 #endif
@@ -236,23 +203,22 @@ void drawMaze()
 #define SCORE_Y         55      // bottom left corner
 #define DIGIT_STEP      7
 
-// a number from the digit sheet, right to left (the digits overlap), the left edge at x or, when centred, the middle
-void drawNumber(int16_t x, int16_t y, uint32_t v, bool centred)
+// a number from the digit sheet, right to left (the digits overlap), the left edge at x
+void drawNumber(int16_t x, int16_t y, uint32_t v)
 {
   char d[8]; byte n = 0;
   do { d[n++] = v % 10; v /= 10; } while (v && n < 7);       // digits, last one first
-  if (centred) x -= ((n - 1) * DIGIT_STEP + 9) / 2;
   for (byte k = 0; k < n; k++)                              // right to left
     sprites.drawPlusMask(x + (n - 1 - k) * DIGIT_STEP, y, digits_plus_mask, d[k]);
 }
 
-void drawScore() { drawNumber(SCORE_X, SCORE_Y, player.score, false); }
+void drawScore() { drawNumber(SCORE_X, SCORE_Y, player.score); }
 
 // the points of a fruit float up from the cell where it was eaten
 static void drawPopup()
 {
   if (!popTimer) return;
-  drawNumber(-8 * popCY - 8 - camSX + 16 * popCX + 12, 8 * popCY - camY - 4 - (POP_TIME - popTimer) / 3, popPts, true);
+  drawNumber(-8 * popCY - 8 - camSX + 16 * popCX + ((popPts < 1000) ? 1 : -3), 8 * popCY - camY - 4 - (POP_TIME - popTimer) / 3, popPts);     // (centred on the cell: 3 or 4 digits)
 }
 
 // the blast of the bomb: an ellipse (2 : 1) that grows from Yum Yum. It is a circle of radius r with every x doubled.

@@ -90,12 +90,14 @@ __attribute__((noinline)) static byte eyesDir(int16_t cx, int16_t cy, byte dir)
     {
       if (dist[i] != lvl) continue;
       any = true;
-      byte c = i & (MAZE_COLS - 1), j = i >> 3;
-      int16_t x = 2 * c + 1, y = top + 2 * j;
-      if (c > 0 && cellOpen(x - 1, y) && dist[i - 1] == 255) dist[i - 1] = lvl + 1;
-      if (c < MAZE_COLS - 1 && cellOpen(x + 1, y) && dist[i + 1] == 255) dist[i + 1] = lvl + 1;
-      if (j > 0 && cellOpen(x, y - 1) && dist[i - MAZE_COLS] == 255) dist[i - MAZE_COLS] = lvl + 1;
-      if (j < EYES_ROWS - 1 && cellOpen(x, y + 1) && dist[i + MAZE_COLS] == 255) dist[i + MAZE_COLS] = lvl + 1;
+      int8_t c = i & (MAZE_COLS - 1), j = i >> 3;
+      for (byte d = 0; d < 4; d++)                                               // the 4 neighbours
+      {
+        int8_t nc = c + dirDX[d], nj = j + dirDY[d];
+        if (nc < 0 || nc >= MAZE_COLS || nj < 0 || nj >= EYES_ROWS) continue;
+        byte ni = nj * MAZE_COLS + nc;
+        if (dist[ni] == 255 && cellOpen(2 * c + 1 + dirDX[d], top + 2 * j + dirDY[d])) dist[ni] = lvl + 1;
+      }
     }
     if (!any || dist[here] != 255) break;                                        // (the search is done when it reaches the eyes)
   }

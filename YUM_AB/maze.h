@@ -2,6 +2,7 @@
 #define MAZE_H
 
 #include "globals.h"
+#include "chunks.h"
 
 // the difficulty chosen in the menu after PLAY: 0 = EASY, 1 = NORMAL, 2 = HARD (what is chosen last stays)
 byte difficulty = 1;
@@ -27,13 +28,9 @@ static const byte diffGhostMax[3] PROGMEM = {  3,  5,  7 };  // never more than 
   y odd   # N h N h ... h N #      N = node (always a path), h = passage between two nodes (path or wall)
   y even  # v # v # ... # v #      v = passage between two nodes in the rows above / below, # = pillar (always wall)
 
-  So there are 8 nodes per row. Two cell rows (one node row + one passage row) are made at a time with
-  Eller's algorithm, which builds a maze row by row and never has to look back:
-    - every node always has at least 2 exits: no dead ends, you can always run in a circle
-    - cells that belong together are tracked in 'sets', so the maze never gets cut in two pieces
-    - a few extra openings are made on purpose, so there are loops
-    - no pillar is left alone: all 4 passages around a pillar can never be open (the wall tiles have
-      no single pillar tile, and it would be one big empty square anyway)
+  So there are 8 nodes per row. The maze is put together from chunks of 8 node rows that were drawn by hand (tools/chunks.txt,
+  checked by tools/chunks.py): every node has at least 2 exits (no dead ends, you can always run in a circle), you can always
+  go on downwards, and no pillar is left alone (the wall tiles have no single pillar tile).
 
   The maze costs 2 x 32 long words: for each cell row one of wall bits and one of dot bits.
 */
@@ -43,12 +40,6 @@ static const byte diffGhostMax[3] PROGMEM = {  3,  5,  7 };  // never more than 
 #define MAZE_RING     32        // cell rows kept in memory (power of 2)
 #define ROW_SHIFT     1024      // the world is shifted back by this many cell rows from time to time (see game.h); multiple of MAZE_RING
 
-#ifndef P_JOIN
-#define P_JOIN        70        // % chance two neighbouring nodes of different sets get a passage
-#endif
-#ifndef P_LOOP
-#define P_LOOP        35        // % chance two neighbouring nodes of the same set get a passage (makes a loop)
-#endif
 #ifndef P_PELLET
 #define P_PELLET      14        // % chance the left and the right node of a node row (from row PELLET_FROM on) hold a power pellet
 #endif
@@ -59,8 +50,9 @@ static const byte diffGhostMax[3] PROGMEM = {  3,  5,  7 };  // never more than 
 // power-ups (spring, bomb, DOTS) are at least this many cell rows apart
 #define ITEM_GAP      14
 #define FRUIT_FROM    6         // fruits (points) from this cell row on
-#define P_FRUIT       12        // % chance of a fruit in a node row ...
+#define P_FRUIT       31        // chance of a fruit in a node row (of 256, so 12 %) ...
 #define FRUIT_GAP     24        // ... that is at least this many cell rows after the last one
+#define FRUIT_CLEAR   4         // fruits, big balls and items keep this many cell rows apart (the fruit is wider than a node)
 #define SPRING_FROM   12
 #ifndef P_BOMB
 #define P_BOMB        6         // % chance of a bomb (power-up) in the middle of a node row that has no spring (from row BOMB_FROM on)
@@ -71,9 +63,6 @@ static const byte diffGhostMax[3] PROGMEM = {  3,  5,  7 };  // never more than 
 #endif
 #define DOTS_FROM     20
 
-#ifndef P_DOWN
-#define P_DOWN        60        // % chance of an extra passage to the next row
-#endif
 
 // The maze is stored in 8 bits per row (the rest of a row is fixed: borders, pillars and nodes) instead of 17 bits per cell row:
 //   wallB[y]   node row (y odd):    bit k = passage k (between node k and k + 1) is open
@@ -91,12 +80,10 @@ int16_t deadY = 0;              // world Y (px): everything above this is the bl
 
 struct
 {
-  uint8_t set[MAZE_COLS];       // set id of the nodes of the next node row
-  uint8_t up;                   // bit c: the node c of the next row has a passage to the row above
-  uint8_t hPrev;                // bit k: passage k of the previous node row was open
-  uint8_t hwy;                  // node rows since the last full-width corridor
-  uint8_t vr[MAZE_COLS];        // vertical passages in a row that end at node c (the one from above included)
   int16_t y;                    // cell row of the next node row (always odd)
+  uint8_t chunkId;              // the chunk that is being used, the row in it and if it is mirrored
+  uint8_t chunkRow;
+  bool    mirror;
   uint16_t n;                   // node rows made so far (the fruits come from this, not from mrnd(): the walls stay the same)
   int16_t lastFruit;            // cell row of the last fruit
   int16_t lastBall;             // cell row of the last big ball (left or right)
@@ -218,231 +205,31 @@ static inline int16_t deadRow() { return deadY >> 3; }          // cell rows abo
 
 
 // generation /////////////////////////////////////////////////////////////////
+//
+// The maze is built from CHUNKS (chunks.h, drawn in tools/chunks.txt): 8 node rows each, 2 bytes per node row (the passages sideways and
+// the passages down, see below). A chunk starts with a full corridor, so any chunk fits under any chunk. A new chunk is picked by random,
+// never the same one twice in a row, and it is mirrored left <-> right by random.
 
-// exits of node c in the row that is being made: up (from the row above), left and right
-static uint8_t nodeDeg(uint8_t c, uint8_t up, uint8_t h)
+static uint8_t revBits(uint8_t v, uint8_t n)
 {
-  uint8_t d = (up >> c) & 1;
-  if (c > 0)              d += (h >> (c - 1)) & 1;
-  if (c < MAZE_COLS - 1)  d += (h >> c) & 1;
-  return d;
-}
-
-#define MAX_DOWNS     8         // (wanted) at most this many passages down per node row: the maze is more horizontal than vertical
-#ifndef P_HIGHWAY
-#define P_HIGHWAY     80        // % chance of a full-width corridor (once there have been 3 normal node rows since the last one)
-#endif
-#define MAX_RUN       3         // at most 3 passages in a row: a straight corridor is never longer than 7 cells
-
-// may passage k of this row be opened (corridor length and the lone pillar rule)?
-static bool canOpen(uint8_t h, uint8_t k, uint8_t up)
-{
-  if ((h >> k) & 1) return true;
-  if (((up >> k) & 1) && ((up >> (k + 1)) & 1) && ((gen.hPrev >> k) & 1)) return false;
-  int8_t l = 0, r = 0;
-  while (k - 1 - l >= 0 && ((h >> (k - 1 - l)) & 1)) l++;
-  while (k + 1 + r < MAZE_COLS - 1 && ((h >> (k + 1 + r)) & 1)) r++;
-  return l + 1 + r <= MAX_RUN;
-}
-
-// may node c get a passage down (corridor length)?
-static bool downOK(uint8_t c, uint8_t up)
-{
-  return !((up >> c) & 1) || gen.vr[c] < MAX_RUN;
-}
-
-// 0 = best node to put a passage down (no passage from above, so no corridor gets longer), 1 = longer corridor, 2 = not allowed
-static uint8_t downTier(uint8_t c, uint8_t up)
-{
-  if (!((up >> c) & 1)) return 0;
-  return (gen.vr[c] < MAX_RUN) ? 1 : 2;
-}
-
-// the nodes of both sides of passage k become one set
-static void joinSets(uint8_t k)
-{
-  uint8_t from = gen.set[k + 1], to = gen.set[k];
-  for (uint8_t c = 0; c < MAZE_COLS; c++) if (gen.set[c] == from) gen.set[c] = to;
-}
-
-// make the next node row (cell row gen.y) and the passage row below it (cell row gen.y + 1)
-// one try at the passages of a node row (uses and changes the sets)
-// the passage next to node c to open when it needs a way sideways: the right one, else the left one
-static uint8_t sideK(uint8_t c, uint8_t h, uint8_t up)
-{
-  uint8_t k = (c < MAZE_COLS - 1) ? c : c - 1;
-  if (!canOpen(h, k, up) && c > 0 && canOpen(h, c - 1, up)) k = c - 1;
-  return k;
-}
-
-// one of the nodes in cand (a bit mask) gets a passage down, one of the best tier, chosen by random
-static void pickDown(uint8_t cand, uint8_t up, uint8_t &down)
-{
-  uint8_t best = 3, n = 0;
-  for (uint8_t d = 0; d < MAZE_COLS; d++) if (((cand >> d) & 1) && downTier(d, up) < best) best = downTier(d, up);
-  for (uint8_t d = 0; d < MAZE_COLS; d++) if (((cand >> d) & 1) && (downTier(d, up) == best || best == 2)) n++;
-  uint8_t pick = mrnd() % n;
-  for (uint8_t d = 0; d < MAZE_COLS; d++)
-    if (((cand >> d) & 1) && (downTier(d, up) == best || best == 2)) { if (pick == 0) { down |= 1 << d; return; } pick--; }
-}
-
-static void makeRow(uint8_t up, uint8_t &h, uint8_t &down)
-{
-  if (gen.hwy >= 3 && mrnd() % 100 < P_HIGHWAY)                                  // a full-width corridor, with plenty of ways down
-  {
-    bool ok = true;
-    for (uint8_t k = 0; k < MAZE_COLS - 1; k++)                                 // (the lone pillar rule must allow all passages)
-      if (((up >> k) & 1) && ((up >> (k + 1)) & 1) && ((gen.hPrev >> k) & 1)) ok = false;
-    if (ok)
-    {
-      h = (1 << (MAZE_COLS - 1)) - 1;
-      for (uint8_t k = 0; k < MAZE_COLS - 1; k++) joinSets(k);
-      down = 0;
-      uint8_t nd = 0;
-      for (uint8_t c = 0; c < MAZE_COLS; c++)
-        if (downOK(c, up) && (mrnd() % 100 < 75 || nodeDeg(c, up, h) < 2)) { down |= 1 << c; nd++; }
-      for (uint8_t t = 0; t < 24 && nd < 5; t++)
-      {
-        uint8_t c = mrnd() & (MAZE_COLS - 1);
-        if (!((down >> c) & 1) && downOK(c, up)) { down |= 1 << c; nd++; }
-      }
-      return;
-    }
-  }
-  // passages between the nodes of this row
-  h = 0;
-
-  // first the nodes that need a way sideways (before the random passages come)
-  for (uint8_t c = 0; c < MAZE_COLS; c++)
-  {
-    bool hasUp = (up >> c) & 1;
-    if (hasUp && gen.vr[c] < MAX_RUN && (mrnd() & 1)) continue;                  // a node with a passage from above may get its second exit later
-    if (nodeDeg(c, up, h) >= (hasUp ? 2 : 1)) continue;
-    bool rightFirst = mrnd() & 1;
-    if (c < MAZE_COLS - 1 && nodeDeg(c + 1, up, h) == 0) rightFirst = true;     // join a neighbour that has no exit either
-    else if (c > 0 && nodeDeg(c - 1, up, h) == 0) rightFirst = false;
-    for (uint8_t t = 0; t < 2; t++)
-    {
-      bool right = (t == 0) == rightFirst;
-      if (right && c < MAZE_COLS - 1 && canOpen(h, c, up)) { h |= 1 << c; joinSets(c); break; }
-      if (!right && c > 0 && canOpen(h, c - 1, up)) { h |= 1 << (c - 1); joinSets(c - 1); break; }
-    }
-  }
-
-  for (uint8_t k = 0; k < MAZE_COLS - 1; k++)
-  {
-    // the pillar above passage k has its other 3 passages open: this one must stay a wall
-    if (!canOpen(h, k, up)) continue;
-    bool differ = gen.set[k] != gen.set[k + 1];
-    if (mrnd() % 100 < (differ ? P_JOIN : P_LOOP))
-    {
-      h |= 1 << k;
-      if (differ) joinSets(k);
-    }
-  }
-
-  // a node without any exit gets one sideways (it has no 'up', so no pillar can be in the way)
-  for (uint8_t c = 0; c < MAZE_COLS; c++)
-  {
-    if (nodeDeg(c, up, h) != 0) continue;
-    uint8_t k = sideK(c, h, up);
-    h |= 1 << k;
-    joinSets(k);
-  }
-
-  // a node that is the end of 2 vertical passages may not go on down, so it needs a way sideways
-  for (uint8_t c = 0; c < MAZE_COLS; c++)
-  {
-    if (downOK(c, up) || nodeDeg(c, up, h) >= 2) continue;
-    uint8_t k = sideK(c, h, up);
-    if (!canOpen(h, k, up)) continue;                                   // (very rare: it gets a long corridor instead, see below)
-    if (!((h >> k) & 1)) { h |= 1 << k; joinSets(k); }
-  }
-
-  // passages down to the next row
-  down = 0;
-  for (uint8_t c = 0; c < MAZE_COLS; c++) if (nodeDeg(c, up, h) < 2) down |= 1 << c;     // at least 2 exits per node (if it must be, a corridor of 7)
-
-  // Every group of nodes that are linked sideways needs a way down. Then you can get from any node to a
-  // lower row without ever going up: there is no pocket that you can only leave by running back up the
-  // maze towards the dead zone.
-  for (uint8_t c = 0; c < MAZE_COLS; )
-  {
-    uint8_t e = c;
-    while (e < MAZE_COLS - 1 && ((h >> e) & 1)) e++;                                      // the group is c .. e
-    bool has = false;
-    for (uint8_t d = c; d <= e; d++) if ((down >> d) & 1) has = true;
-    if (!has) pickDown(((1 << (e + 1)) - 1) & ~((1 << c) - 1), up, down);
-    c = e + 1;
-  }
-
-  uint8_t seen = 0;
-  for (uint8_t c = 0; c < MAZE_COLS; c++)                                                 // every set must continue downwards
-  {
-    uint8_t id = gen.set[c];
-    if ((seen >> id) & 1) continue;
-    seen |= 1 << id;
-    uint8_t any = 0;
-    bool has = false;
-    for (uint8_t d = 0; d < MAZE_COLS; d++)
-    {
-      if (gen.set[d] != id) continue;
-      any |= 1 << d;
-      if ((down >> d) & 1) has = true;
-    }
-    if (!has) pickDown(any, up, down);
-  }
-  for (uint8_t c = 0; c < MAZE_COLS; c++) if (mrnd() % 100 < P_DOWN && (!((up >> c) & 1) || gen.vr[c] < 2)) down |= 1 << c;
-
-}
-
-// is the row what we want: every node has 2 exits and no corridor is longer than 5 cells?
-static bool rowValid(uint8_t up, uint8_t h, uint8_t down, bool strict)
-{
-  uint8_t limited = 0;
-  for (uint8_t c = 0; c < MAZE_COLS; c++)
-  {
-    if (nodeDeg(c, up, h) + ((down >> c) & 1) < 2) return false;
-    if (((down >> c) & 1) && !downOK(c, up)) return false;
-    if (((down >> c) & 1) && ((up >> c) & 1)) limited++;                       // this node will be at the end of 2 vertical passages
-  }
-  uint8_t nd = 0;
-  for (uint8_t c = 0; c < MAZE_COLS; c++) nd += (down >> c) & 1;
-  if (strict && (limited > 1 || nd > MAX_DOWNS)) return false;                                        // (it is easier for the next row if there are none)
-  uint8_t run = 0;
-  if (h == (1 << (MAZE_COLS - 1)) - 1) return true;                                // (the full-width corridor is meant to be long)
-  for (uint8_t k = 0; k < MAZE_COLS - 1; k++)
-  {
-    run = ((h >> k) & 1) ? run + 1 : 0;
-    if (run > MAX_RUN) return false;
-  }
-  return true;
+  uint8_t r = 0;
+  while (n--) { r = (r << 1) | (v & 1); v >>= 1; }
+  return r;
 }
 
 void genNodeRow()
 {
-  uint8_t up = gen.up;
-
-  // nodes that do not come from above start a set of their own
-  uint8_t used = 0;
-  for (uint8_t c = 0; c < MAZE_COLS; c++) if ((up >> c) & 1) used |= 1 << gen.set[c];
-  for (uint8_t c = 0; c < MAZE_COLS; c++)
+  if (gen.chunkRow == 0)                                                                  // the next chunk
   {
-    if ((up >> c) & 1) continue;
-    uint8_t id = 0;
-    while ((used >> id) & 1) id++;
-    gen.set[c] = id;
-    used |= 1 << id;
+    uint8_t id = mrnd() % CHUNKS;
+    if (id == gen.chunkId) id = (id + 1) % CHUNKS;
+    gen.chunkId = id;
+    gen.mirror = mrnd() & 1;
   }
-
-  uint8_t h, down, saved[MAZE_COLS];
-  for (uint8_t c = 0; c < MAZE_COLS; c++) saved[c] = gen.set[c];
-  for (uint8_t tries = 0; ; tries++)                                                      // (a row that breaks the corridor limit is made again)
-  {
-    makeRow(up, h, down);
-    if (rowValid(up, h, down, tries < 12) || tries >= 60) break;
-    for (uint8_t c = 0; c < MAZE_COLS; c++) gen.set[c] = saved[c];
-  }
+  const uint8_t *p = chunkData + (gen.chunkId * CHUNK_ROWS + gen.chunkRow) * 2;
+  uint8_t h = pgm_read_byte(p), down = pgm_read_byte(p + 1);
+  if (gen.mirror) { h = revBits(h, MAZE_COLS - 1); down = revBits(down, MAZE_COLS); }
+  if (++gen.chunkRow == CHUNK_ROWS) gen.chunkRow = 0;
 
   // write the two cell rows (see the top of this file for the format)
   uint8_t r0 = gen.y & (MAZE_RING - 1), r1 = (gen.y + 1) & (MAZE_RING - 1);
@@ -456,13 +243,13 @@ void genNodeRow()
   pelletB[r1] = 0;
   if (gen.y >= PELLET_FROM)
     for (uint8_t c = 0; c < MAZE_COLS; c += MAZE_COLS - 1)                       // power pellets only in the first and the last node column
-      if ((gen.y - gen.lastBall) >= pgm_read_byte(&diffBallGap[difficulty]) && mrnd() % 100 < pgm_read_byte(&diffPellet[difficulty]))
+      if ((gen.y - gen.lastBall) >= pgm_read_byte(&diffBallGap[difficulty]) && (gen.y - gen.lastFruit) >= FRUIT_CLEAR && mrnd() % 100 < pgm_read_byte(&diffPellet[difficulty]))
       {
         gen.lastBall = gen.y;
         pelletB[r0] |= (c == 0) ? 1 : 2;
         eatenB[r0]  |= 1U << c;
       }
-  bool itemRoom = (gen.y - gen.lastItem) >= ITEM_GAP;
+  bool itemRoom = (gen.y - gen.lastItem) >= ITEM_GAP && (gen.y - gen.lastFruit) >= FRUIT_CLEAR;
   static const byte itemFrom[3] PROGMEM = { SPRING_FROM, BOMB_FROM, DOTS_FROM };   // a spring, else a bomb, else DOTS: in node 3 or 4 (x = 7 or 9)
   for (uint8_t i = 0; i < 3 && itemRoom; i++)
     if (gen.y >= pgm_read_byte(&itemFrom[i]) && mrnd() % 100 < pgm_read_byte(&diffItem[i][difficulty]))
@@ -476,25 +263,20 @@ void genNodeRow()
   if (pelletB[r0] & 0xFC) gen.lastItem = gen.y;
 
   gen.n++;
-  if (gen.y >= FRUIT_FROM && (gen.y - gen.lastFruit) >= FRUIT_GAP)               // a fruit: in node column 1, 2, 5 or 6 (the others hold power-ups)
+  if (gen.y >= FRUIT_FROM && (gen.y - gen.lastFruit) >= FRUIT_GAP && (gen.y - gen.lastItem) >= FRUIT_CLEAR && (gen.y - gen.lastBall) >= FRUIT_CLEAR)               // a fruit
   {
-    uint16_t hs = gen.n * 40503u ^ mazeSeed * 2531u ^ 0x5A5Au;                   // (a hash, no mrnd(): the walls and power-ups stay as they were)
-    hs ^= hs >> 7; hs *= 0x9E37u; hs ^= hs >> 5;
-    if (hs % 100 < P_FRUIT)
+    uint8_t hs = (uint8_t)gen.n * 73 + (uint8_t)mazeSeed * 29 + (uint8_t)(mazeSeed >> 8);      // (a hash, no mrnd(): the walls and power-ups stay as they were)
+    hs ^= hs >> 3; hs *= 45;
+    if (hs < P_FRUIT)
     {
-      static const uint8_t fruitCol[4] PROGMEM = { 1, 2, 5, 6 };
-      uint8_t kind = gen.n / 40 + ((hs >> 12) & 1);                              // deeper in the maze: better fruit
+      uint8_t kind = gen.n / 40 + ((hs >> 2) & 1);                               // deeper in the maze: better fruit
       if (kind > 3) kind = 3;
-      fruitB[r0] = 0x80 | (kind << 3) | pgm_read_byte(&fruitCol[(hs >> 8) & 3]);
+      uint8_t col = hs & 3;                                                      // node column 1, 2, 5 or 6 (the others hold power-ups)
+      fruitB[r0] = 0x80 | (kind << 3) | (col + 1 + (col > 1 ? 2 : 0));
       gen.lastFruit = gen.y;
     }
   }
 
-  for (uint8_t c = 0; c < MAZE_COLS; c++)
-    gen.vr[c] = ((down >> c) & 1) ? ((((up >> c) & 1) ? gen.vr[c] : 0) + 1) : 0;
-  gen.hwy = (h == (1 << (MAZE_COLS - 1)) - 1) ? 0 : (gen.hwy < 250 ? gen.hwy + 1 : 250);
-  gen.up = down;
-  gen.hPrev = h;
   gen.y += 2;
 }
 
@@ -514,16 +296,13 @@ void mazeInit(uint16_t seed)
   mazeRng = mazeSeed;
   for (uint8_t i = 0; i < 8; i++) mrnd();
   for (uint8_t i = 0; i < MAZE_RING; i++) { wallB[i] = 0; eatenB[i] = 0; pelletB[i] = 0; fruitB[i] = 0; }   // (row 0 = all passages closed = the wall on top of the maze)
-  gen.up = 0;
-  gen.hPrev = 0;
-  gen.hwy = 0;
-  for (uint8_t c = 0; c < MAZE_COLS; c++) gen.vr[c] = 0;
+  gen.chunkId = 255;
+  gen.chunkRow = 0;
   gen.y = 1;
   gen.lastItem = -100;
   gen.lastBall = -100;
   gen.lastFruit = -100;
   gen.n = 0;
-  for (uint8_t c = 0; c < MAZE_COLS; c++) gen.set[c] = c;
   ensureRows(20);
 }
 
